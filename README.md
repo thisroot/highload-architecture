@@ -3,7 +3,8 @@
 2. [Проблемы нагрузок](#problems)
 3. [Тестирование производительности](#testing)
 4. [Индексы](#indexes)
-5. [Репликация](#repication)
+5. [Репликация](#replication)
+6. [Шардирование](#sharding)
 
 ### <a name="metrics"></a> Метрики качества
 #### Что мерять
@@ -657,6 +658,44 @@ https://dev.mysql.com/doc/refman/5.7/en/change-replication-filter.html
 Обзор, бенчмарки, сравнения: 
 - http://mysqlhighavailability.com/performance-evaluation-mysql-5-7-group-replication/
 
+
+#### Транзакции
+- подготовить транзакию движком базы данных
+- записать транзакию в binary log
+- завершить транзакию в движке базы
+- вернуть ответ клиенту
+
+#### Отставание репликации
+- В нормальной ситуации отставание достигает секунды.
+    - Плохие запросы (и по мастеру, и по реплике) могут вызвать отставание репликации.
+- Рекомендация:
+    - Убивайте медленные запросы.
+    - Держите отдельную реплику для медленных запросов.
+    - Думайте о кросс-СУБД репликации.
+    - Старайтесь избегать паттерна запись-чтение.
+    
+#### Чтение данных
+- свои данные читаем с мастера, чуижие со слейва
+- Монотонное чтение
+    - Ожидается, что пользователь не будет видеть пропадающие комментарии.
+    - Вариант - привязать пользователя к реплике.
+- Согласованное префиксное чтение
+    - Характерно для шардированных баз данных.
+    - Важно для сохранения причинно-следственных связей.
+    
+
+#### Конфликты репликации
+- Избегание конфликтов.
+- Last wins.
+- Ранг реплик. Выйгрывает запись от старшей реплики.
+- Слияние.
+- Решение конфликтов на клиенте.
+- Conflict-free replicated data types (CRDT).
+- Mergeable persistent data structures.
+
+#### Безмастерная репликация
+- Предотвращение энтропии данных - Формула для расчета кворума: w + r > number of replicas
+
 #### Литература
 - https://www.youtube.com/watch?v=ppI74hTuXO0
 - https://www.youtube.com/watch?v=_r8vLPTl0PE
@@ -667,3 +706,212 @@ https://dev.mysql.com/doc/refman/5.7/en/change-replication-filter.html
 - блог Percona
 
  [ к оглавлению >>](#contents)
+ 
+### <a name="sharding"></a> Шардирование
+#### Партицирование
+- берем данные и разделяем по какому-то признаку
+- разделенные данные физически лежат отдельно
+- все в пределах одного сервера!
+- бывает разных типов
+- в теории, должно работать быстрее (?)
+#### Типы партицирования
+- key
+- range
+- list
+- hash
+
+```sql
+    CREATE TABLE members (
+        firstname VARCHAR(25) NOT NULL,
+        lastname VARCHAR(25) NOT NULL,
+        username VARCHAR(16) NOT NULL,
+        email VARCHAR(35),
+        joined DATE NOT NULL
+    )
+    PARTITION BY RANGE( YEAR(joined) ) (
+        PARTITION p0 VALUES LESS THAN (1960),
+        PARTITION p1 VALUES LESS THAN (1970),
+        PARTITION p2 VALUES LESS THAN (1980),
+        PARTITION p3 VALUES LESS THAN (1990),
+        PARTITION p4 VALUES LESS THAN MAXVALUE
+    );
+```
+> https://dev.mysql.com/doc/refman/8.0/en/partitioning.html
+```sql
+    CREATE TABLE measurement (
+        city_id
+        int not null,
+        logdate
+        date not null,
+        peaktemp
+        int,
+        unitsales
+        int
+    ) PARTITION BY RANGE (logdate);
+    CREATE TABLE measurement_y2006m02 PARTITION OF measurement
+        FOR VALUES FROM ('2006-02-01') TO ('2006-03-01');
+    CREATE TABLE measurement_y2006m03 PARTITION OF measurement
+        FOR VALUES FROM ('2006-03-01') TO ('2006-04-01');
+```
+> https://www.postgresql.org/docs/10/ddl-partitioning.html
+
+#### Шардирование
+
+![](img/39.png)
+
+- один из вариантов масштабирования
+- разбиение данных на куски
+- данные живут физически на разных серверах (ну обычно так)
+- не репликация - !
+- не партиционирование - !
+
+#### Зачем нужно шардирование
+- горизонтальное масштабирование
+- ускорить обработку запросов (особенно запись!)
+- повысить отказоустойчивость(*)
+
+#### Выбор критерия шардирования
+![](img/40.png)
+- Key Based Sharding
+    - еще называют hash based
+    - формула примерно такая: F(key) -> shard_id
+    - F и key очень важны
+    - наиболее распространенный способ
+    - плюсы
+        - просто и понятно (+)
+        - равномерное распределение (+)
+        - алгоритмическое распределение (+)
+    - минусы
+        - добавление/удаление шарда всегда боль (-)
+
+![](img/41.png)
+- Range Based Sharding
+    - может называться table function/virtual bucket
+    - статический конфиг range -> shard
+    - формула примерно такая: hash(key) -> virtual_bucket -> shard_id
+    - плюсы
+        - прост в реализации (+)
+    - минусы
+        - потенциально неравномерная нагрузка (-)
+        - обновление (-)
+![](img/42.png)
+- Directory Based Sharding
+    - похож на range based
+    - отображение key -> shard_id
+    - low cardinality для key - наш случай
+    - плюсы
+        - гибкость (+)
+    - минусы
+        - обновление (-)
+        - SPOF (-)
+
+#### Роутинг
+- из приложения (умный клиент)
+    - простой метод
+    - нет лишних хопов
+    - как обновлять/решардить?
+- прокси
+    - приложение вообще не знает о шардинге
+    - код не меняется
+    - лишний хоп (*)
+    - могут падать
+    - им нужно общаться
+    - https://www.proxysql.com https://shardingsphere.apache.org/document/current/en/manual/sharding-proxy
+- координатор
+    - приложение вообще не знает о шардинге
+    - код не меняется
+    - лишний хоп
+    - нагрузка
+    - SPOF
+    
+#### Проблемы шардинга
+- Плохо распределили данные
+    - подобрать лучший ключ/функцию шардирования
+    - решардинг (если имеет смысл)
+- JOIN
+    - держать нужные данные на одной машине
+    - делать вычисления на одной машине
+    
+#### Решардинг
+- В лоб:
+    - в худшем случае нужно перемешать все данные
+    - если степени 2ки - уже неплохо (переместить ~50%)
+    - Пример:
+        - формула shard_id % count
+        - 16 записей на 8 шардов => 2 записи на шард
+        - 16 записей на 16 шардов => 1 запись на шард
+- Consistent hashing
+    - используем одну hash-функцию для нод и данных
+    - выбирается ближайший по часовой стрелке узел
+    - при добавлении/удалении затрагивается только часть
+    - формально не больше K/N (K-ключи, N-сервера)
+    - Данные могут быть распределены неравномерно.
+- Consistent hashing - Virtual Nodes
+    - помогает разделить данные более равномерно
+    - количество физических серверов не меняется
+    
+#### Шардирование и производительность запросов
+- запросы по ключу шардирования вероятно ускорятся
+- запросы не по ключу обойдут все шарды
+- запросы по диапазону ключей могут обойти все шарды
+- aggregating, joinы - отдельная тема
+    
+Было:
+- Total = Serial + Parallel
+
+Стало:
+- Total = Serial + Parallel/N + Xserial
+
+https://en.wikipedia.org/wiki/Amdahl%27s_law
+
+#### Базы и шардинг
+- MySQL не умеет автошардинг (NDB ?)
+- Postgres умеет автошардинг (FDW)
+- Cassandra умеет автошардинг
+- MongoDB умеет автошардинг
+
+```sql
+    CREATE TABLE temperature (
+        id BIGSERIAL PRIMARY KEY NOT NULL,
+        city_id INT NOT NULL,
+        timestamp TIMESTAMP NOT NULL,
+        temp DECIMAL(5,2) NOT NULL
+    );
+    
+    CREATE TABLE temperature_201904 (
+        id BIGSERIAL NOT NULL,
+        city_id INT NOT NULL,
+        timestamp TIMESTAMP NOT NULL,
+        temp DECIMAL(5,2) NOT NULL
+    );
+    
+    CREATE EXTENSION postgres_fdw;
+    GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw to app_user;
+    CREATE SERVER shard02 FOREIGN DATA WRAPPER postgres_fdw
+        OPTIONS (dbname 'postgres', host 'shard02', port
+        '5432');
+    CREATE USER MAPPING for app_user SERVER shard02
+        OPTIONS (user 'fdw_user', password 'secret');
+    
+    CREATE FOREIGN TABLE temperature_201904 PARTITION OF temperature
+        FOR VALUES FROM ('2019-04-01') TO ('2019-05-01')
+        SERVER remoteserver01;
+
+```
+
+#### Доп материалы
+- https://www.percona.com/blog/2018/08/21/foreign-data-wrappers-postgresql-postgres_fdw
+- https://www.percona.com/blog/2019/05/24/an-overview-of-sharding-in-postgresql-and-how-it-relates-to-mongodbs
+- https://www.youtube.com/watch?v=MhGO7BBqSBU
+- https://www.youtube.com/watch?v=xx_Lv1P_X_I
+- https://www.youtube.com/watch?v=ihrPoHlDFkk
+- https://www.mysql.com/products/cluster/scalability.html
+- https://www.postgresql.org/docs/9.5/postgres-fdw.html
+- https://clickhouse.yandex/docs/en/operations/table_engines/distributed/
+
+
+
+
+ [ к оглавлению >>](#contents)
+ 
+  ### <a name="sharding"></a> Шардирование
