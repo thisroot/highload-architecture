@@ -3,6 +3,7 @@
 2. [Проблемы нагрузок](#problems)
 3. [Тестирование производительности](#testing)
 4. [Индексы](#indexes)
+5. [Репликация](#repication)
 
 ### <a name="metrics"></a> Метрики качества
 #### Что мерять
@@ -502,3 +503,167 @@ https://stackoverflow.com/questions/22372960/is-this-explanation-about-vss-rss-p
         ORDER BY b LIMIT 10
     ```               
     [ к оглавлению >>](#contents)
+### <a name="replication"></a> Репликация
+Репликация - это копирование данных
+- один из способов масштабирования
+- можно использовать множество серверов для обработки запросов
+- не является backup
+##### Зачем
+- Не помогает ускорить запись
+- помогает ускорить чтение
+- Помогает при падениях
+##### Master-Slave
+![](img/32.png)
+- один источник данных
+- наиболее распространенный подход
+- относительно просто и понятно
+- отключить/включить реплику
+- мастер иногда крашится...
+
+##### Master-master
+![](img/33.png)
+- нет единой точки отказа
+- постоянное время работы
+- легкий failover
+- нет консистентности (все обязательно поломается)
+- group replication?
+#### Виды синхронизации
+- sync
+    - закомитили локально, закомитили удаленно (Postgres)
+    - сделанное изменения видные всем и везде
+- async
+    - закомитили локально, все (MySQL, Postgres))
+    - никаких гарантий на другом конце
+- semi-sync
+    - закомитили локально, получили ack (MySQL)
+    - доступно здесь, уже скопировано на другой конец
+#### Репликация в MySql
+![](img/34.png)
+- Master:
+    - обрабатывает запросы
+    - делает транзакции
+    - пишет binary logs
+    - binlog dump thread (SHOW PROCESSLIST на мастере)
+- Slave:
+    - стягивает изменения с мастера, кладет в relay log
+    - читает данные из relay log и применяет изменения
+    - slave I/O thread (SHOW SLAVE STATUS на слейве)
+    - slave SQL thread
+   
+> https://dev.mysql.com/doc/refman/5.7/en/replication-implementation-details.html
+
+#####  Форматы
+- statement based
+    - передаются сами запросы
+    - гоняется небольшое количество данных
+    - все запросы в логе
+    - UPDATE items SET enabled=1 WHERE time < UNIX_TIMESTAMP(NOW())-60 и все поломалось каждый запрос считается на каждой ноде
+    https://dev.mysql.com/doc/refman/8.0/en/replication-rbr-safe-unsafe.html
+- row based
+    - передаются измененные строчки
+    - бинарный формат
+    - непонятны границы statementа
+    - его трудно читать
+    - before/after image
+    - Посмотрите на binlog_row_image: full, minimal, blob https://dev.mysql.com/doc/refman/5.7/en/replication-options-binary-log.html#sysvar_binlog_row_image
+- mixed
+> https://dev.mysql.com/doc/refman/5.7/en/binary-log-setting.html
+
+#### Фильтрация репликации
+![](img/35.png)
+- можно реплицировать данные частично
+- можно обогощать данные слейва
+- использовать осторожно!
+
+Опции:
+- replicate_do_db, replicate_ignore_db, replicate_do_table...
+https://dev.mysql.com/doc/refman/5.7/en/change-replication-filter.html
+
+#### Позиционирование логов
+- binary log position (FILE NAME + OFFSET)
+    - mysql-bin.00078:44
+    - локальный для сервера
+    - обязательно разъедется!
+- GTID (SOURCE_ID:TRANSACTION_ID)
+    - 7F33BC78-56CA-44B3-5E33-B34CC7689333:44
+    - глобален, генерируется автоматически при коммите
+    - бесплатная трассировка
+    - простой slave promotion
+    - используйте его!
+    - https://dev.mysql.com/doc/refman/5.7/en/replication-gtids.html
+    
+#### Параллельная репликация
+- обычно используется однопоточная репликация всех данных
+- с MySQL5.6 можно реплицировать параллельно несколько баз данных
+- с MySQL5.7 можно реплицировать параллельно одни и те же таблицы
+
+Полезные опции:
+- slave-parallel-workers
+- slave-parallel-type (DATABASE|LOGICAL_CLOCK)
+> https://dev.mysql.com/doc/refman/5.7/en/replication-options-slave.html
+
+![](img/36.png)
+Сценарий:
+- 1 мастер, 3 слейва
+- первый реплицирует в 1 поток
+- второй реплицирует в 20 потоков
+- третий реплицирует в 100 потоков
+- вставка в 25 различных таблиц внутри одной базы в 100 потоков (sysbench)
+> https://www.percona.com/blog/2016/02/10/estimating-potential-for-mysql-5-7-parallel-replication/
+
+#### Репликация в Postgrees - WAL
+![](img/37.png)
+- физические изменения страниц (значение в блоке 2564 равно 154)
+- сюда попадают абсолютно все операции
+- один журная на все
+> https://wiki.postgresql.org/images/a/af/FOSDEM-2015-New-WAL-format.pdf
+
+#### Репликация в MySQL
+- есть binlog
+- у некоторых движков есть аналог WAL (InnoDB Undo/Redo Log)
+- с точки зрения MySQL - это разные логи!
+- нарушение абстракций (логгирование реализовано на разных уровнях программы)
+- MySQL пишет больше данных для репликации (~1.5 раза)
+> https://dev.mysql.com/doc/refman/5.7/en/innodb-undo-logs.html
+
+#### Логическая репликация
+- тот самый row based формат
+- работает с кортежами данных
+- не знает, как они хранятся на диске
+- CPU-bound, можно параллелить по процессорам
+- В Postgres10+ тоже есть - https://www.postgresql.org/docs/10/logical-replication.html
+
+#### Физическая репликация
+- работает со страницами
+- slave = master байт в байт
+- Postgres WAL, InnoDB Undo/RedoLog - как примеры работающих со страницами
+- IO-bound, нет смысла параллелить
+
+#### Групповая репликация
+![](img/38.png)
+- плагин начиная с версии MySQL5.7
+- по сути - синхронная репликация
+- нет концепта master-slave, скорее master-master
+- репликация между всеми нодами
+- single primary (по умолчанию)
+- кворум, умеет automatic failover
+- flow control (я что-то очень отстал)
+- лимит в 9 node
+
+Можно попробовать групповую репликацю в докере:
+- https://mysqlhighavailability.com/setting-up-mysql-group-replication-with-mysql-docker-images/
+Документация:
+- https://dev.mysql.com/doc/refman/5.7/en/group-replication.html
+Обзор, бенчмарки, сравнения: 
+- http://mysqlhighavailability.com/performance-evaluation-mysql-5-7-group-replication/
+
+#### Литература
+- https://www.youtube.com/watch?v=ppI74hTuXO0
+- https://www.youtube.com/watch?v=_r8vLPTl0PE
+- https://m.habr.com/ru/company/oleg-bunin/blog/414111/
+- https://severalnines.com/database-blog/overview-logical-replication-postgresql
+- документация MySQL
+- документация Postgres
+- блог Percona
+
+ [ к оглавлению >>](#contents)
