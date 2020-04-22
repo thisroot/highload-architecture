@@ -10,6 +10,7 @@
 7. [Кеширование](#caching)
 9. [Брокеры сообщений](#message-broker)
 10. [Транзакции в РСУБД](#transactions)
+11. [In-memory СУБД](#in-memory)
 
 ### <a name="metrics"></a> Метрики качества
 #### Что мерять
@@ -1522,6 +1523,170 @@ Read uncommitted, Read committed, Repeatable read, Serializable.
 надо синхронизировать).
 - Есть комбинированное решение. OLAP - выносится в отдельные потоки выполнения с MVCC.
 
+
+[ к оглавлению >>](#contents)
+
+### <a name="in-memory"></a> In-memory СУБД Tarantool
+
+- Ускорение работы
+- Избегаем проблем кешей
+- Экономия денег
+- Горизонтальное масштабирование
+- Полноценный lua application server
+
+#### Когда не использовать
+- Хранение логов
+- Аналитические запросы
+- Тяжелые запросы
+
+#### Терминология
+- space - таблица
+- tuple - строка таблицы
+#### Создание space
+- box.schema.space.create('myspace', {if_not_exists=true})
+
+#### Создание индекса
+
+```
+box.space.myspace:create_index(
+    'primary', {
+        type="TREE", 
+        unique=true,
+        parts={
+            1, 'unsigned', 2, 'string'
+        }, 
+        if_not_exists=true
+    })
+```
+
+#### Параметры индексов
+- type - тип индекса: TREE, HASH, RTREE, BITMAP
+- unique - уникальность индекса
+- parts - индексные поля. Важно - можно использовать префикс индекса
+
+#### Вставка данных
+```shell script
+        > box.space.myspace:insert({"test", 3, 6})
+        ---
+        - error: 'Tuple field 1 type does not
+        match one required by operation: expected unsigned'
+        ...
+        > box.space.myspace:insert({1, 'qwerty', 6})
+        ---
+        - [1, 'qwerty', 6]
+        ...
+        > box.space.myspace:insert({1, 10, 6})
+        ---
+        - error: Duplicate key exists in unique index
+        'primary' in space 'myspace'
+        ...
+        > box.space.myspace:insert({2, 10, 6})
+        ---
+        - [2, 10, 6]
+        ...
+        > box.space.myspace:insert({3, 10, 6, 98})
+        ---
+        - [3, 10, 6, 98]
+        ...
+```
+- В кортеже может быть переменное число столбцов
+- В кортеж можно вставлять сложные типы данных
+- Типы данных в неиндексных полях могут несовпадать.
+
+#### Изменение данных
+
+```shell script
+    > box.space.myspace:update({2}, {{'+', 3, 1}})
+    ---
+    - [2, 10, 7]
+    ...
+    > box.space.myspace:update({2}, {{'+', 3, 1}})
+    ---
+    - [2, 10, 8]
+    ...
+    > box.space.myspace:update({2}, {{'+', 3, 10}})
+    ---
+    - [2, 10, 18]
+    ...
+    > box.space.myspace:update({2}, {{'-', 3, 3}})
+    ---
+    - [2, 10, 15]
+    ...
+    > box.space.myspace:update({2}, {{'=', 3, 148}})
+    ---
+    - [2, 10, 148]
+    ...
+```
+- Важно: менять можно только по уникальному индексу.
+
+#### SELECT
+```shell script
+    box.space.myspace:create_index('tindex', {type="TREE", parts={3, 'unsigned'}, unique=false})
+    box.space.myspace:create_index('hindex', {type="HASH", parts={1, 'unsigned'}})
+    box.space.myspace:select({}) box.space.myspace.index.tindex:select({}) box.space.myspace.index.tindex:select({148})
+    box.space.myspace.index.tindex:select({148}, {iterator='GT'}) box.space.myspace.index.tindex:select({148}, {iterator='GE'})
+    box.space.myspace.index.hindex:select({3}, {iterator='GE'})
+```
+#### Другие операции
+- replace
+- delete
+- upsert
+#### Хранимые процедуры
+```lua
+    function myproc(id)
+        local tup = box.space.myspace.index.tindex:select({id}, {iterator='GE'})
+        return tup[2]
+    end
+```
+#### Переключение контекста
+
+- Не забывайте, что тарантул однопоточен.
+- Тарантул передает управление сам при:
+    - Модифицирующих операциях
+    - Блокирующих системных вызовах
+- select не передает управление
+    - Во время долгих циклов пользуйтесь `fiber.yield()`
+
+#### Транзакции
+- Начало транзакции - box.begin()
+- Откат транзакции - box.rollback()
+- Подтверждение транзакции - box.commit()
+Важно: блокирующие операции откатывают транзакцию автоматически
+
+#### Практика
+Изучаем сервис профилей Почта@Mail.ru
+- https://github.com/mailru/tntlua/blob/master/pro le17.lua
+
+#### Репликация mysql <-> tarantol
+- https://github.com/tarantool/mysql-tarantool-replication
+- https://habr.com/ru/company/mailru/blog/323870/
+
+[ к оглавлению >>](#contents)
+
+### <a name="sharding"></a> Шардирование
+
+####
+####
+####
+####
+####
+####
+####
+####
+####
+####
+####
+####
+####
+####
+####
+####
+####
+####
+####
+####
+####
+####
 
 [ к оглавлению >>](#contents)
 
